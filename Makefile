@@ -42,8 +42,8 @@ image-push: image ## Push to CONTAINER_REGISTRY via your adapter
 
 reproduce: data image ## THE ONE COMMAND. Grader runs this.
 	docker run --rm \
-	  -v "$$PWD/data:/app/data:ro" \
-	  -v "$$PWD/reports:/app/reports" \
+	  -v "$(CURDIR)/data:/app/data:ro" \
+	  -v "$(CURDIR)/reports:/app/reports" \
 	  -e MLFLOW_TRACKING_URI=sqlite:////app/reports/mlflow.db \
 	  $(IMAGE):$(TAG) --seed $(SEED) --metrics-out /app/reports/metrics.json
 

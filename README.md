@@ -115,6 +115,9 @@ seeds. Under real time pressure you would keep some and drop others.
 Which would you drop first, and what specifically breaks when you do? There is a defensible
 answer, and we compare answers in Session 2. An answer that refuses to choose scores zero.
 
+answer: Under extreme time pressure, I would drop the base image digest first while keeping dependency hashes and seeds. Official Python slim base tags change infrequently and maintain backwards compatibility, whereas unpinned Python packages or uncontrolled random seeds immediately introduce non-deterministic model variance and silent dependency drift across machines.
+
+
 ---
 
 ## Notes for the grader
