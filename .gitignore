@@ -1,5 +1,6 @@
 cloud.env
 mlflow.db
+*.joblib
 mlruns/
 reports/
 __pycache__/
