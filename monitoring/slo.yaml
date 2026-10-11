@@ -1,0 +1,50 @@
+# Lab 4 — service level objectives.
+#
+# Most students write a target and stop. The third field is where the thinking is: an SLO
+# without a stated response to exhaustion is a wish, not an objective.
+
+service: itcs355-predict
+
+objectives:
+  - name: availability
+    # Why 99.5% and not 99.9%: the endpoint runs ONE replica (min = max = 1) to stay inside
+    # the 800 THB term budget, so there is no redundancy and a replica restart is an outage.
+    # 99.5% over 30 days allows about 3.6 hours of failed requests, which a single replica
+    # can honour; 99.9% (43 minutes) would need a second replica and roughly double the
+    # serving cost. We pay for the target we can actually keep.
+    target: 0.995
+    window: 30d
+    measurement: "successful responses / total responses, excluding 4xx"
+    on_budget_exhausted: |
+      Freeze all deploys except a rollback or a fix for the cause of the outage, until the
+      window recovers. Roll back by redeploying the previous commit-SHA image (digest-pinned,
+      so it is exactly what ran before). Write a post-mortem before the freeze lifts. Revise
+      the target only after that review, never in the middle of an incident.
+
+  - name: latency
+    target_p95_ms: 400         # identical to the threshold in loadtest/k6.js, set before measuring
+    window: 7d
+    # k6 measures from the client, so this target includes the network hop from where the
+    # test runs. The endpoint-side p95 on the dashboard is the diagnostic view and is
+    # expected to sit well below it.
+    measurement: "p95 of /predict as seen by the k6 client (includes network); the endpoint-side p95 on the dashboard is for diagnosis"
+    on_budget_exhausted: |
+      Stop shipping anything that makes the model or payload heavier. First look for a
+      repeating p99 spike (cold start or a replica restart), then rerun the Lab 3 instance
+      size and batch-size experiments to see whether a bigger machine type is cheaper than
+      the budget burn. If the cause is load, raise max replicas; if it is the model, the
+      model-behaviour latency test should already have failed in CI, so fix that test gap too.
+
+  - name: freshness
+    # Retraining is monthly (capstone proposal). 45 days = one monthly cycle plus 15 days
+    # of grace for a failed or rejected retrain, so a single bad run does not breach the SLO.
+    # If the Lab 5 retrain trigger changes cadence, change this number with it.
+    target_max_model_age_days: 45
+    window: continuous
+    measurement: "days since the production model version was trained"
+    on_budget_exhausted: |
+      Treat it as an incident: find out why the scheduled retrain did not land. Keep serving
+      the current model (a stale model that works beats a fresh one nobody evaluated) and
+      run the evaluation-gated retrain by hand. Never skip the gate to make the number turn
+      green. If a drift alert is also firing, follow the post-mortem decision tree first:
+      if the cause is upstream, do not retrain on that data at all.

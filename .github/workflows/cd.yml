@@ -1,0 +1,96 @@
+# ITCS355 Lab 4 — continuous deployment.
+#
+# Runs only on main, only after CI is green. Credentials come from OIDC federation, not
+# from stored keys — TODO(Lab 4): uncomment the block for YOUR provider and delete the
+# other two.
+
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-staging:
+    # Only a green CI run, and only one triggered by a push (never a pull request).
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      # The exact commit CI tested. workflow_run otherwise checks out the tip of main, which
+      # may already be a newer, untested commit.
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      MODEL_VERSION: ${{ github.event.workflow_run.head_sha }}
+      # The eight capability slots src/config.py insists on. cloud.env is gitignored, so in CI
+      # they arrive as repository variables.
+      CLOUD_PROVIDER: gcp
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      BLOB_URI: ${{ vars.BLOB_URI }}
+      CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
+      MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+      MODEL_REGISTRY_NAME: ${{ vars.MODEL_REGISTRY_NAME }}
+      IDENTITY_REF: ${{ secrets.GCP_DEPLOY_SA }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - run: gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev --quiet
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install google-cloud-storage google-cloud-aiplatform google-cloud-monitoring
+
+      # CI's images lived on a different runner and are gone, so build again from the same
+      # commit. The model is produced the way the CI integration test produces it and baked
+      # in at /app/model.joblib, which is where the adapter's deploy() points MODEL_PATH.
+      - name: Build serving image
+        run: |
+          python scripts/make_dataset.py
+          python -m src.train --metrics-out reports/metrics.json
+          python scripts/export_model.py --out reports/model.joblib
+          docker buildx build --platform linux/amd64 -f service/Dockerfile.serve \
+            -t itcs355-serve-base:${SHA} --load .
+          mkdir -p /tmp/modelctx && cp reports/model.joblib /tmp/modelctx/model.joblib
+          printf 'FROM itcs355-serve-base:%s\nCOPY --chown=runner:runner model.joblib /app/model.joblib\n' "${SHA}" \
+            > /tmp/modelctx/Dockerfile
+          docker buildx build --platform linux/amd64 -t itcs355-serve:${SHA} --load /tmp/modelctx
+
+      - name: Push image
+        id: push
+        run: python scripts/cd_steps.py push --tag itcs355-serve:${SHA}
+
+      - name: Deploy to staging
+        id: deploy
+        run: |
+          python scripts/cd_steps.py deploy \
+            --model-ref "${{ steps.push.outputs.ref }}" \
+            --endpoint "${{ vars.ENDPOINT_NAME }}" \
+            --instance "${{ vars.INSTANCE_TYPE }}"
+
+      - name: Smoke test
+        run: |
+          python scripts/cd_steps.py smoke \
+            --endpoint "${{ steps.deploy.outputs.endpoint }}" \
+            --expect-version "${SHA}"
