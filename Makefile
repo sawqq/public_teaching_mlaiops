@@ -42,8 +42,8 @@ image-push: image ## Push to CONTAINER_REGISTRY via your adapter
 
 reproduce: data image ## THE ONE COMMAND. Grader runs this.
 	docker run --rm \
-	  -v "$$PWD/data:/app/data:ro" \
-	  -v "$$PWD/reports:/app/reports" \
+	  -v "$(CURDIR)/data:/app/data:ro" \
+	  -v "$(CURDIR)/reports:/app/reports" \
 	  -e MLFLOW_TRACKING_URI=sqlite:////app/reports/mlflow.db \
 	  $(IMAGE):$(TAG) --seed $(SEED) --metrics-out /app/reports/metrics.json
 
@@ -80,6 +80,12 @@ loadtest: ## Load test at three concurrency levels
 	  echo "=== $$vus VUs ==="; \
 	  k6 run -e TARGET=$(TARGET) -e VUS=$$vus loadtest/k6.js || true; \
 	done
+
+deploy: ## Deploy the serving image to a live Vertex AI endpoint
+	python -c "from src import config; from cloudlayer.factory import get_adapter; cfg=config.load(); print(get_adapter(cfg).deploy('$(IMAGE_REF)', '$(ENDPOINT)', '$(INSTANCE)'))"
+
+smoke: ## Invoke the live endpoint with a known payload
+	python -c "from src import config; from cloudlayer.factory import get_adapter; cfg=config.load(); a=get_adapter(cfg); print(a.invoke('$(ENDPOINT)', {'temp_c':78.4,'vibration_mm_s':3.1,'pressure_kpa':315.2,'hours_since_service':4200,'load_pct':68.0,'ambient_humidity':55.0}))"
 
 # --- Lab 4 -------------------------------------------------------------------
 inject-drift: ## Shift a feature's distribution on purpose

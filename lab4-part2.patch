@@ -1,0 +1,886 @@
+diff --git a/.github/workflows/cd.yml b/.github/workflows/cd.yml
+index 644b97d..59bca37 100644
+--- a/.github/workflows/cd.yml
++++ b/.github/workflows/cd.yml
+@@ -1,8 +1,11 @@
+-# ITCS355 Lab 4 — continuous deployment.
++# ITCS355 Lab 4 — continuous deployment (GCP).
+ #
+-# Runs only on main, only after CI is green. Credentials come from OIDC federation, not
+-# from stored keys — TODO(Lab 4): uncomment the block for YOUR provider and delete the
+-# other two.
++# Runs only after CI succeeded on a push to main. Credentials come from workload identity
++# federation (OIDC), not from stored keys: there is no JSON key anywhere in this repository
++# or in its secrets.
++#
++# One-time setup (repository Settings -> Secrets and variables -> Actions) is listed in
++# docs/lab4-gcp-runbook.md.
+ 
+ name: CD
+ 
+@@ -18,45 +21,79 @@ permissions:
+ 
+ jobs:
+   deploy-staging:
+-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
++    # Only a green CI run, and only one triggered by a push (never a pull request).
++    if: >-
++      ${{ github.event.workflow_run.conclusion == 'success'
++          && github.event.workflow_run.event == 'push' }}
+     runs-on: ubuntu-latest
+     environment: staging
++    env:
++      # The exact commit CI tested. workflow_run otherwise checks out the tip of main, which
++      # may already be a newer, untested commit.
++      SHA: ${{ github.event.workflow_run.head_sha }}
++      MODEL_VERSION: ${{ github.event.workflow_run.head_sha }}
++      # The eight capability slots src/config.py insists on. cloud.env is gitignored, so in CI
++      # they arrive as repository variables.
++      CLOUD_PROVIDER: gcp
++      PROJECT_ID: ${{ vars.PROJECT_ID }}
++      REGION: ${{ vars.REGION }}
++      BLOB_URI: ${{ vars.BLOB_URI }}
++      CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
++      MLFLOW_TRACKING_URI: sqlite:///mlflow.db
++      MODEL_REGISTRY_NAME: ${{ vars.MODEL_REGISTRY_NAME }}
++      IDENTITY_REF: ${{ secrets.GCP_DEPLOY_SA }}
+     steps:
+       - uses: actions/checkout@v7
++        with:
++          ref: ${{ github.event.workflow_run.head_sha }}
+ 
+-      # --- AWS ---------------------------------------------------------------
+-      # - uses: aws-actions/configure-aws-credentials@v4
+-      #   with:
+-      #     role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+-      #     aws-region: ${{ vars.REGION }}
+-      # - run: aws ecr get-login-password --region ${{ vars.REGION }} | docker login --username AWS --password-stdin ${{ vars.CONTAINER_REGISTRY }}
+-
+-      # --- Azure -------------------------------------------------------------
+-      # - uses: azure/login@v2
+-      #   with:
+-      #     client-id: ${{ secrets.AZURE_CLIENT_ID }}
+-      #     tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+-      #     subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+-      # - run: az acr login --name ${{ vars.ACR_NAME }}
+-
+-      # --- GCP ---------------------------------------------------------------
+-      # - uses: google-github-actions/auth@v2
+-      #   with:
+-      #     workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+-      #     service_account: ${{ secrets.GCP_DEPLOY_SA }}
+-      # - run: gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev
++      - uses: google-github-actions/auth@v2
++        with:
++          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
++          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+ 
+-      - name: Push image
++      - run: gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev --quiet
++
++      - uses: actions/setup-python@v7
++        with:
++          python-version: "3.11"
++          cache: pip
++
++      - name: Install
+         run: |
+-          echo "TODO(Lab 4): push the SHA-tagged image through your adapter"
+-          # python -c "from src import config; from cloudlayer.factory import get_adapter; \
+-          #   print(get_adapter(config.load()).push_image('itcs355-serve:${{ github.sha }}'))"
++          pip install --upgrade pip
++          pip install -r requirements.txt
++          pip install google-cloud-storage google-cloud-aiplatform google-cloud-monitoring
++
++      # CI's images lived on a different runner and are gone, so build again from the same
++      # commit. The model is produced the way the CI integration test produces it and baked
++      # in at /app/model.joblib, which is where the adapter's deploy() points MODEL_PATH.
++      - name: Build serving image
++        run: |
++          python scripts/make_dataset.py
++          python -m src.train --metrics-out reports/metrics.json
++          python scripts/export_model.py --out reports/model.joblib
++          docker buildx build --platform linux/amd64 -f service/Dockerfile.serve \
++            -t itcs355-serve-base:${SHA} --load .
++          mkdir -p /tmp/modelctx && cp reports/model.joblib /tmp/modelctx/model.joblib
++          printf 'FROM itcs355-serve-base:%s\nCOPY --chown=runner:runner model.joblib /app/model.joblib\n' "${SHA}" \
++            > /tmp/modelctx/Dockerfile
++          docker buildx build --platform linux/amd64 -t itcs355-serve:${SHA} --load /tmp/modelctx
++
++      - name: Push image
++        id: push
++        run: python scripts/cd_steps.py push --tag itcs355-serve:${SHA}
+ 
+       - name: Deploy to staging
++        id: deploy
+         run: |
+-          echo "TODO(Lab 4): adapter.deploy(model_ref, endpoint, instance)"
++          python scripts/cd_steps.py deploy \
++            --model-ref "${{ steps.push.outputs.ref }}" \
++            --endpoint "${{ vars.ENDPOINT_NAME }}" \
++            --instance "${{ vars.INSTANCE_TYPE }}"
+ 
+       - name: Smoke test
+         run: |
+-          echo "TODO(Lab 4): adapter.invoke() with three known payloads."
+-          echo "A deploy that is not smoke-tested is a deploy you have not verified."
++          python scripts/cd_steps.py smoke \
++            --endpoint "${{ steps.deploy.outputs.endpoint }}" \
++            --expect-version "${SHA}"
+diff --git a/docs/lab4-gcp-runbook.md b/docs/lab4-gcp-runbook.md
+new file mode 100644
+index 0000000..dfa41e9
+--- /dev/null
++++ b/docs/lab4-gcp-runbook.md
+@@ -0,0 +1,165 @@
++# Lab 4 on GCP — runbook
++
++Everything here is run by you, in order. Steps 1 to 5 need your GCP project; the repo-side
++changes (tests, SLO, drift threshold, CD workflow, scripts) are already verified locally.
++Nothing in steps 1 to 5 could be run against real GCP while writing this, so expect to fix a
++typo or a missing permission; the error message will name the field or the role.
++
++Set these once in your shell (WSL2):
++
++```bash
++set -a; source cloud.env; set +a            # PROJECT_ID, REGION, BLOB_URI, CONTAINER_REGISTRY, MODEL_REGISTRY_NAME
++export GH_REPO=<github-user>/<repo>
++export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
++gcloud services enable run.googleapis.com cloudscheduler.googleapis.com monitoring.googleapis.com \
++  logging.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com iamcredentials.googleapis.com \
++  --project $PROJECT_ID
++```
++
++## 1. Keyless CI identity (workload identity federation)
++
++```bash
++gcloud iam service-accounts create itcs355-cd --project $PROJECT_ID
++SA=itcs355-cd@$PROJECT_ID.iam.gserviceaccount.com
++
++gcloud iam workload-identity-pools create github --project $PROJECT_ID --location=global
++gcloud iam workload-identity-pools providers create-oidc github-actions \
++  --project $PROJECT_ID --location=global --workload-identity-pool=github \
++  --issuer-uri="https://token.actions.githubusercontent.com" \
++  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
++  --attribute-condition="assertion.repository=='$GH_REPO'"
++
++gcloud iam service-accounts add-iam-policy-binding $SA --project $PROJECT_ID \
++  --role=roles/iam.workloadIdentityUser \
++  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/$GH_REPO"
++
++for ROLE in roles/artifactregistry.writer roles/aiplatform.user roles/monitoring.metricWriter; do
++  gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA" --role=$ROLE
++done
++```
++
++If the CD deploy step later says permission denied, that is the "CI can build but not deploy"
++failure from the lab handout: grant the role the error names to `$SA`, and write down what broke.
++
++GitHub repository **Secrets** (Settings, Secrets and variables, Actions):
++
++| Secret | Value |
++|---|---|
++| `GCP_WIF_PROVIDER` | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github/providers/github-actions` |
++| `GCP_DEPLOY_SA` | `itcs355-cd@<PROJECT_ID>.iam.gserviceaccount.com` |
++
++**Variables** (same page): `PROJECT_ID`, `REGION`, `BLOB_URI`, `CONTAINER_REGISTRY`,
++`MODEL_REGISTRY_NAME` (same values as your `cloud.env`), `ENDPOINT_NAME` (e.g. `itcs355-staging`)
++and `INSTANCE_TYPE` (e.g. `n1-standard-2`). Create an environment called `staging`
++(Settings, Environments).
++
++## 2. First deploy
++
++Merge to `main`. CI runs; when it is green, CD builds the serving image for that exact commit,
++pushes it, deploys it and smoke-tests it. The smoke test fails the run unless all three
++payloads come back from the commit SHA that was pushed.
++
++## 3. Monitoring: metrics, alert, dashboard
++
++First make sure the service's JSON log lines reach Cloud Logging as `jsonPayload.msg.*` (Logs
++Explorer, send one request to the endpoint, open the entry). Then:
++
++```bash
++ALERT_EMAIL=<an inbox you read> bash monitoring/gcp/setup.sh
++```
++
++This creates four log-based metrics (requests by model version, 4xx, 5xx, latency), an email
++channel, the drift alert policy (PSI above 0.15) and the dashboard. Send some traffic (the Lab
++3 k6 run) and the panels fill in after a few minutes. Log-based metrics only count requests
++made after they exist.
++
++## 4. The scheduled drift run
++
++Add one line to your root `Dockerfile` so the training image can run the detector, then rebuild
++and push it (`make image-push`):
++
++```dockerfile
++COPY --chown=runner:runner monitoring/ ./monitoring/
++```
++
++Upload the reference window and a clean current window (600 rows from a fresh draw):
++
++```bash
++python -c "from scripts.make_dataset import build; build(4242).sample(n=600, random_state=1).to_csv('data/current_clean.csv', index=False)"
++python -c "from src import config; from cloudlayer.factory import get_adapter; a=get_adapter(config.load()); print(a.upload('data/raw/sensors.csv','drift/reference.csv')); print(a.upload('data/current_clean.csv','drift/current.csv'))"
++```
++
++Create the job and the schedule (every 10 minutes while you do the exercise; pause it after):
++
++```bash
++IMAGE=<digest reference of the training image you pushed>
++DRIFT_SA=itcs355-drift@$PROJECT_ID.iam.gserviceaccount.com
++gcloud iam service-accounts create itcs355-drift --project $PROJECT_ID
++gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$DRIFT_SA" --role=roles/monitoring.metricWriter
++gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$DRIFT_SA" --role=roles/storage.objectViewer
++
++gcloud run jobs create itcs355-drift --project $PROJECT_ID --region $REGION --image "$IMAGE" \
++  --service-account $DRIFT_SA --command python \
++  --args "scripts/drift_job.py,--reference-uri,$BLOB_URI/drift/reference.csv,--current-uri,$BLOB_URI/drift/current.csv" \
++  --set-env-vars "CLOUD_PROVIDER=gcp,PROJECT_ID=$PROJECT_ID,REGION=$REGION,BLOB_URI=$BLOB_URI,CONTAINER_REGISTRY=$CONTAINER_REGISTRY,MLFLOW_TRACKING_URI=sqlite:///mlflow.db,MODEL_REGISTRY_NAME=$MODEL_REGISTRY_NAME,IDENTITY_REF=$DRIFT_SA" \
++  --labels course=itcs355,lab=4
++
++gcloud run jobs add-iam-policy-binding itcs355-drift --project $PROJECT_ID --region $REGION \
++  --member="serviceAccount:$DRIFT_SA" --role=roles/run.invoker
++
++gcloud scheduler jobs create http itcs355-drift --project $PROJECT_ID --location $REGION \
++  --schedule="*/10 * * * *" --http-method=POST \
++  --uri="https://$REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/itcs355-drift:run" \
++  --oauth-service-account-email=$DRIFT_SA
++```
++
++Run it once by hand (`gcloud run jobs execute itcs355-drift --region $REGION --wait`), check the
++log shows six `psi=` lines, and check `drift.psi.temp_c` appears in Metrics Explorer.
++
++## 5. The injected-drift evidence
++
++```bash
++python scripts/inject_drift.py --source data/current_clean.csv --out data/current.csv \
++  --feature temp_c --mode shift --magnitude 6
++date -u                                    # T0: write this down
++python -c "from src import config; from cloudlayer.factory import get_adapter; print(get_adapter(config.load()).upload('data/current.csv','drift/current.csv'))"
++```
++
++Wait for the email (T1). Detection time = T1 minus T0; it is bounded by the 10-minute schedule
++plus the alert evaluation delay, and you should say so. Capture the email with its timestamp,
++the dashboard with the drift panel crossing the red line, and fill the `<FILL>` fields in the
++README section. Then restore the clean window and pause the schedule:
++
++```bash
++python -c "from src import config; from cloudlayer.factory import get_adapter; get_adapter(config.load()).upload('data/current_clean.csv','drift/current.csv')"
++gcloud scheduler jobs pause itcs355-drift --project $PROJECT_ID --location $REGION
++```
++
++## 6. The blocked bad commit
++
++```bash
++git switch -c bad/fahrenheit
++sed -i 's|"temp_c": round(float(temp), 3),|"temp_c": round(float(temp) * 9 / 5 + 32, 3),|' scripts/make_dataset.py
++git commit -am "WIP: write temp_c in Fahrenheit (intentionally bad, Lab 4 evidence)"
++git push -u origin bad/fahrenheit
++```
++
++Open a pull request. CI fails at **Data contract tests** on
++`test_features_within_plausible_ranges` (`temp_c above plausible ceiling: 240.215`). Screenshot
++the red run and the error, then close the PR without merging and delete the branch.
++
++## 7. Teardown (scheduled jobs are the ones people forget)
++
++```bash
++gcloud scheduler jobs delete itcs355-drift --project $PROJECT_ID --location $REGION --quiet
++gcloud run jobs delete itcs355-drift --project $PROJECT_ID --region $REGION --quiet
++gcloud alpha monitoring policies list --project $PROJECT_ID --format='value(name)'      # delete each itcs355 one
++gcloud monitoring dashboards list --project $PROJECT_ID --format='value(name)'          # delete the itcs355 one
++for m in requests 4xx 5xx latency_ms; do gcloud logging metrics delete itcs355_predict_$m --project $PROJECT_ID --quiet; done
++```
++
++The Vertex endpoint and its deployed models are billed per replica-hour, so they matter most:
++undeploy every model from the endpoint, delete the endpoint, then delete the uploaded models and
++the images in Artifact Registry. `make teardown` is not implemented in the GCP adapter yet (it
++is a Lab 5 method), so do this by hand and verify in the console. Recheck billing after about 24
++hours.
+diff --git a/monitoring/gcp/dashboard.json b/monitoring/gcp/dashboard.json
+new file mode 100644
+index 0000000..5ef4510
+--- /dev/null
++++ b/monitoring/gcp/dashboard.json
+@@ -0,0 +1,245 @@
++{
++  "displayName": "ITCS355 - Prediction service",
++  "labels": {
++    "course": "itcs355"
++  },
++  "mosaicLayout": {
++    "columns": 12,
++    "tiles": [
++      {
++        "xPos": 0,
++        "yPos": 0,
++        "width": 6,
++        "height": 4,
++        "widget": {
++          "title": "Request rate (req/s)",
++          "xyChart": {
++            "dataSets": [
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilter": {
++                    "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_requests\"",
++                    "aggregation": {
++                      "alignmentPeriod": "60s",
++                      "perSeriesAligner": "ALIGN_RATE",
++                      "crossSeriesReducer": "REDUCE_SUM"
++                    }
++                  }
++                },
++                "plotType": "LINE",
++                "legendTemplate": "requests"
++              }
++            ],
++            "yAxis": {
++              "label": "req/s",
++              "scale": "LINEAR"
++            }
++          }
++        }
++      },
++      {
++        "xPos": 6,
++        "yPos": 0,
++        "width": 6,
++        "height": 4,
++        "widget": {
++          "title": "Error rate by class (share of requests)",
++          "xyChart": {
++            "dataSets": [
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilterRatio": {
++                    "numerator": {
++                      "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_4xx\"",
++                      "aggregation": {
++                        "alignmentPeriod": "300s",
++                        "perSeriesAligner": "ALIGN_SUM",
++                        "crossSeriesReducer": "REDUCE_SUM"
++                      }
++                    },
++                    "denominator": {
++                      "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_requests\"",
++                      "aggregation": {
++                        "alignmentPeriod": "300s",
++                        "perSeriesAligner": "ALIGN_SUM",
++                        "crossSeriesReducer": "REDUCE_SUM"
++                      }
++                    }
++                  }
++                },
++                "plotType": "LINE",
++                "legendTemplate": "4xx (caller)"
++              },
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilterRatio": {
++                    "numerator": {
++                      "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_5xx\"",
++                      "aggregation": {
++                        "alignmentPeriod": "300s",
++                        "perSeriesAligner": "ALIGN_SUM",
++                        "crossSeriesReducer": "REDUCE_SUM"
++                      }
++                    },
++                    "denominator": {
++                      "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_requests\"",
++                      "aggregation": {
++                        "alignmentPeriod": "300s",
++                        "perSeriesAligner": "ALIGN_SUM",
++                        "crossSeriesReducer": "REDUCE_SUM"
++                      }
++                    }
++                  }
++                },
++                "plotType": "LINE",
++                "legendTemplate": "5xx (us)"
++              }
++            ],
++            "yAxis": {
++              "label": "fraction",
++              "scale": "LINEAR"
++            }
++          }
++        }
++      },
++      {
++        "xPos": 0,
++        "yPos": 4,
++        "width": 6,
++        "height": 4,
++        "widget": {
++          "title": "Latency p50 / p95 / p99 (server-side, ms)",
++          "xyChart": {
++            "dataSets": [
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilter": {
++                    "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_latency_ms\"",
++                    "aggregation": {
++                      "alignmentPeriod": "300s",
++                      "perSeriesAligner": "ALIGN_DELTA",
++                      "crossSeriesReducer": "REDUCE_PERCENTILE_50"
++                    }
++                  }
++                },
++                "plotType": "LINE",
++                "legendTemplate": "p50"
++              },
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilter": {
++                    "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_latency_ms\"",
++                    "aggregation": {
++                      "alignmentPeriod": "300s",
++                      "perSeriesAligner": "ALIGN_DELTA",
++                      "crossSeriesReducer": "REDUCE_PERCENTILE_95"
++                    }
++                  }
++                },
++                "plotType": "LINE",
++                "legendTemplate": "p95"
++              },
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilter": {
++                    "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_latency_ms\"",
++                    "aggregation": {
++                      "alignmentPeriod": "300s",
++                      "perSeriesAligner": "ALIGN_DELTA",
++                      "crossSeriesReducer": "REDUCE_PERCENTILE_99"
++                    }
++                  }
++                },
++                "plotType": "LINE",
++                "legendTemplate": "p99"
++              }
++            ],
++            "yAxis": {
++              "label": "ms",
++              "scale": "LINEAR"
++            },
++            "thresholds": [
++              {
++                "label": "SLO p95 400 ms",
++                "value": 400,
++                "color": "RED",
++                "direction": "ABOVE"
++              }
++            ]
++          }
++        }
++      },
++      {
++        "xPos": 6,
++        "yPos": 4,
++        "width": 6,
++        "height": 4,
++        "widget": {
++          "title": "Feature drift: PSI per feature (alert at 0.15)",
++          "xyChart": {
++            "dataSets": [
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilter": {
++                    "filter": "metric.type=starts_with(\"custom.googleapis.com/itcs355/drift.psi.\") resource.type=\"global\"",
++                    "aggregation": {
++                      "alignmentPeriod": "3600s",
++                      "perSeriesAligner": "ALIGN_MAX"
++                    }
++                  }
++                },
++                "plotType": "LINE"
++              }
++            ],
++            "yAxis": {
++              "label": "PSI",
++              "scale": "LINEAR"
++            },
++            "thresholds": [
++              {
++                "label": "alert 0.15",
++                "value": 0.15,
++                "color": "RED",
++                "direction": "ABOVE"
++              }
++            ]
++          }
++        }
++      },
++      {
++        "xPos": 0,
++        "yPos": 8,
++        "width": 6,
++        "height": 4,
++        "widget": {
++          "title": "Model version in production (requests by version)",
++          "xyChart": {
++            "dataSets": [
++              {
++                "timeSeriesQuery": {
++                  "timeSeriesFilter": {
++                    "filter": "metric.type=\"logging.googleapis.com/user/itcs355_predict_requests\"",
++                    "aggregation": {
++                      "alignmentPeriod": "300s",
++                      "perSeriesAligner": "ALIGN_SUM",
++                      "crossSeriesReducer": "REDUCE_SUM",
++                      "groupByFields": [
++                        "metric.label.model_version"
++                      ]
++                    }
++                  }
++                },
++                "plotType": "STACKED_BAR",
++                "legendTemplate": "${metric.labels.model_version}"
++              }
++            ],
++            "yAxis": {
++              "label": "requests",
++              "scale": "LINEAR"
++            }
++          }
++        }
++      }
++    ]
++  }
++}
+\ No newline at end of file
+diff --git a/monitoring/gcp/setup.sh b/monitoring/gcp/setup.sh
+new file mode 100644
+index 0000000..461cc08
+--- /dev/null
++++ b/monitoring/gcp/setup.sh
+@@ -0,0 +1,143 @@
++#!/usr/bin/env bash
++# Lab 4 — create the monitoring pieces for the prediction service on GCP.
++#
++#   PROJECT_ID=itcs355-<id> ALERT_EMAIL=you@example.com bash monitoring/gcp/setup.sh
++#
++# Creates, idempotently:
++#   1. four log-based metrics read from the service's JSON access log
++#      (requests by model version, 4xx, 5xx, latency distribution)
++#   2. an email notification channel
++#   3. an alert policy: any drift.psi.<feature> metric above 0.15 sends the email
++#   4. the dashboard (monitoring/gcp/dashboard.json)
++#
++# The service already logs one JSON line per request (service/app.py):
++#   {"ts": ..., "level": "INFO", "msg": {"request_id": ..., "path": "/predict",
++#    "status": 200, "latency_ms": 3.2, "model_version": "<sha>"}}
++# Cloud Logging parses that into jsonPayload.msg.*, which is what the filters below read.
++# Before running this, confirm those fields exist: Logs Explorer, send one request, open the
++# entry. If the Vertex endpoint shows no container logs, enable container logging on deploy.
++
++set -euo pipefail
++
++: "${PROJECT_ID:?set PROJECT_ID}"
++: "${ALERT_EMAIL:?set ALERT_EMAIL (where the drift alert should be sent)}"
++HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++TMP="$(mktemp -d)"
++trap 'rm -rf "$TMP"' EXIT
++
++BASE_FILTER='resource.type="aiplatform.googleapis.com/Endpoint" AND jsonPayload.msg.path="/predict"'
++
++upsert_metric() {   # name, config file
++  if gcloud logging metrics describe "$1" --project "$PROJECT_ID" >/dev/null 2>&1; then
++    gcloud logging metrics update "$1" --project "$PROJECT_ID" --config-from-file="$2"
++  else
++    gcloud logging metrics create "$1" --project "$PROJECT_ID" --config-from-file="$2"
++  fi
++}
++
++cat > "$TMP/requests.yaml" <<EOF
++description: "ITCS355 /predict requests, by model version"
++filter: '${BASE_FILTER}'
++metricDescriptor:
++  metricKind: DELTA
++  valueType: INT64
++  unit: "1"
++  labels:
++  - key: model_version
++    valueType: STRING
++labelExtractors:
++  model_version: EXTRACT(jsonPayload.msg.model_version)
++EOF
++
++cat > "$TMP/4xx.yaml" <<EOF
++description: "ITCS355 /predict responses with a 4xx status (caller problems)"
++filter: '${BASE_FILTER} AND jsonPayload.msg.status>=400 AND jsonPayload.msg.status<500'
++metricDescriptor:
++  metricKind: DELTA
++  valueType: INT64
++  unit: "1"
++EOF
++
++cat > "$TMP/5xx.yaml" <<EOF
++description: "ITCS355 /predict responses with a 5xx status (our problems)"
++filter: '${BASE_FILTER} AND jsonPayload.msg.status>=500'
++metricDescriptor:
++  metricKind: DELTA
++  valueType: INT64
++  unit: "1"
++EOF
++
++cat > "$TMP/latency.yaml" <<EOF
++description: "ITCS355 /predict latency in ms, measured inside the service"
++filter: '${BASE_FILTER}'
++valueExtractor: EXTRACT(jsonPayload.msg.latency_ms)
++metricDescriptor:
++  metricKind: DELTA
++  valueType: DISTRIBUTION
++  unit: ms
++bucketOptions:
++  exponentialBuckets:
++    numFiniteBuckets: 48
++    growthFactor: 1.3
++    scale: 1
++EOF
++
++upsert_metric itcs355_predict_requests "$TMP/requests.yaml"
++upsert_metric itcs355_predict_4xx "$TMP/4xx.yaml"
++upsert_metric itcs355_predict_5xx "$TMP/5xx.yaml"
++upsert_metric itcs355_predict_latency_ms "$TMP/latency.yaml"
++
++# --- the channel the drift alert reaches: a real inbox -------------------------------------
++CHANNEL="$(gcloud beta monitoring channels list --project "$PROJECT_ID" \
++  --filter="displayName='itcs355 drift email'" --format='value(name)' | head -n1)"
++if [ -z "$CHANNEL" ]; then
++  CHANNEL="$(gcloud beta monitoring channels create --project "$PROJECT_ID" \
++    --display-name='itcs355 drift email' --type=email \
++    --channel-labels="email_address=${ALERT_EMAIL}" --format='value(name)')"
++fi
++echo "notification channel: $CHANNEL"
++
++# --- alert policy: PSI above the threshold justified in README / monitoring/drift.py -------
++cat > "$TMP/policy.json" <<'EOF'
++{
++  "displayName": "itcs355 drift: PSI above 0.15",
++  "combiner": "OR",
++  "conditions": [
++    {
++      "displayName": "any drift.psi.<feature> >= 0.15",
++      "conditionThreshold": {
++        "filter": "metric.type=starts_with(\"custom.googleapis.com/itcs355/drift.psi.\") AND resource.type=\"global\"",
++        "comparison": "COMPARISON_GT",
++        "thresholdValue": 0.15,
++        "duration": "0s",
++        "aggregations": [
++          {"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_MAX"}
++        ],
++        "evaluationMissingData": "EVALUATION_MISSING_DATA_INACTIVE"
++      }
++    }
++  ],
++  "alertStrategy": {"autoClose": "1800s"},
++  "documentation": {
++    "content": "A feature's PSI against the training reference crossed 0.15. Before retraining, check whether the schema or null rate changed (broken upstream: do NOT retrain) and see docs/postmortem-template.md.",
++    "mimeType": "text/markdown"
++  }
++}
++EOF
++EXISTING="$(gcloud alpha monitoring policies list --project "$PROJECT_ID" \
++  --filter="displayName='itcs355 drift: PSI above 0.15'" --format='value(name)' | head -n1)"
++if [ -n "$EXISTING" ]; then
++  gcloud alpha monitoring policies delete "$EXISTING" --project "$PROJECT_ID" --quiet
++fi
++gcloud alpha monitoring policies create --project "$PROJECT_ID" \
++  --policy-from-file="$TMP/policy.json" --notification-channels="$CHANNEL"
++
++# --- dashboard ---------------------------------------------------------------------------
++OLD="$(gcloud monitoring dashboards list --project "$PROJECT_ID" \
++  --filter="displayName='ITCS355 - Prediction service'" --format='value(name)' | head -n1)"
++if [ -n "$OLD" ]; then
++  gcloud monitoring dashboards delete "$OLD" --project "$PROJECT_ID" --quiet
++fi
++gcloud monitoring dashboards create --project "$PROJECT_ID" --config-from-file="$HERE/dashboard.json"
++
++echo "done. Log-based metrics take a few minutes to start collecting; they only count requests made AFTER they exist."
+diff --git a/scripts/cd_steps.py b/scripts/cd_steps.py
+new file mode 100644
+index 0000000..12ccb37
+--- /dev/null
++++ b/scripts/cd_steps.py
+@@ -0,0 +1,108 @@
++"""Lab 4 — the steps of cd.yml, each a thin call through the CloudAdapter seam.
++
++    python scripts/cd_steps.py push   --tag itcs355-serve:<sha>
++    python scripts/cd_steps.py deploy --model-ref <repo@sha256:...> --endpoint NAME --instance TYPE
++    python scripts/cd_steps.py smoke  --endpoint <resource name> --expect-version <sha>
++
++Nothing here knows which cloud it runs on: it only calls adapter.push_image / deploy / invoke,
++so the same workflow survives a provider swap. Each step writes `key=value` to
++$GITHUB_OUTPUT (when set) so the next step can use the result.
++"""
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from cloudlayer.factory import get_adapter  # noqa: E402
++from src import config  # noqa: E402
++
++# Three known inputs: a machine that should look healthy, the load-test payload, and a worn,
++# hot one. The checks are about shape and ordering, not exact numbers, so they stay valid
++# when the model is retrained.
++HEALTHY = {"temp_c": 66.0, "vibration_mm_s": 1.4, "pressure_kpa": 330.0,
++           "hours_since_service": 50.0, "load_pct": 30.0, "ambient_humidity": 50.0}
++TYPICAL = {"temp_c": 78.4, "vibration_mm_s": 3.1, "pressure_kpa": 315.2,
++           "hours_since_service": 4200.0, "load_pct": 68.0, "ambient_humidity": 55.0}
++WORN = {"temp_c": 82.0, "vibration_mm_s": 4.0, "pressure_kpa": 310.0,
++        "hours_since_service": 8500.0, "load_pct": 75.0, "ambient_humidity": 60.0}
++
++
++def set_output(key: str, value: str) -> None:
++    print(f"{key}={value}")
++    path = os.environ.get("GITHUB_OUTPUT")
++    if path:
++        with open(path, "a", encoding="utf-8") as fh:
++            fh.write(f"{key}={value}\n")
++
++
++def push(adapter, tag: str) -> int:
++    ref = adapter.push_image(tag)
++    if "@sha256:" not in ref:
++        print(f"FAIL  push_image returned {ref!r}; expected a digest reference (repo@sha256:...)")
++        return 1
++    set_output("ref", ref)
++    return 0
++
++
++def deploy(adapter, model_ref: str, endpoint: str, instance: str) -> int:
++    resource = adapter.deploy(model_ref, endpoint, instance)
++    set_output("endpoint", resource)
++    return 0
++
++
++def smoke(adapter, endpoint: str, expect_version: str) -> int:
++    """A deploy that is not smoke-tested is a deploy you have not verified."""
++    failures = []
++    scores = {}
++    for name, payload in (("healthy", HEALTHY), ("typical", TYPICAL), ("worn", WORN)):
++        response = adapter.invoke(endpoint, payload)
++        prob = response.get("probability")
++        version = response.get("model_version")
++        scores[name] = prob
++        if not isinstance(prob, (int, float)) or not 0.0 <= prob <= 1.0:
++            failures.append(f"{name}: probability missing or outside [0, 1]: {prob!r}")
++        if version != expect_version:
++            failures.append(f"{name}: serving version {version!r}, expected {expect_version!r}")
++    if not failures and scores["healthy"] >= scores["worn"]:
++        failures.append(f"ordering: healthy scored {scores['healthy']:.3f}, "
++                        f"worn {scores['worn']:.3f}; risk should be higher for the worn machine")
++    print("scores:", {k: (round(v, 4) if isinstance(v, (int, float)) else v) for k, v in scores.items()})
++    if failures:
++        for line in failures:
++            print("FAIL ", line)
++        return 1
++    print(f"OK  3/3 payloads scored by version {expect_version}")
++    return 0
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="step", required=True)
++
++    p = sub.add_parser("push")
++    p.add_argument("--tag", required=True)
++
++    d = sub.add_parser("deploy")
++    d.add_argument("--model-ref", required=True)
++    d.add_argument("--endpoint", required=True)
++    d.add_argument("--instance", required=True)
++
++    s = sub.add_parser("smoke")
++    s.add_argument("--endpoint", required=True)
++    s.add_argument("--expect-version", required=True)
++
++    args = ap.parse_args()
++    adapter = get_adapter(config.load())
++    if args.step == "push":
++        return push(adapter, args.tag)
++    if args.step == "deploy":
++        return deploy(adapter, args.model_ref, args.endpoint, args.instance)
++    return smoke(adapter, args.endpoint, args.expect_version)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/drift_job.py b/scripts/drift_job.py
+new file mode 100644
+index 0000000..54d6d44
+--- /dev/null
++++ b/scripts/drift_job.py
+@@ -0,0 +1,65 @@
++"""Lab 4 — the scheduled drift run. This is what Cloud Scheduler triggers.
++
++    python scripts/drift_job.py \
++        --reference-uri gs://<bucket>/itcs355/drift/reference.csv \
++        --current-uri   gs://<bucket>/itcs355/drift/current.csv
++
++Downloads both windows through the adapter, scores PSI per feature with the same code as
++`python -m monitoring.drift`, and writes each score as the metric drift.psi.<feature>.
++
++It exits 0 whenever the job itself worked, even when drift was found. The alert comes from
++the metric alert policy (monitoring/gcp/setup.sh), which is what sends the email. If this
++exited non-zero on drift, the scheduler would record a failed run and nobody would learn
++the one thing the job exists to say.
++"""
++from __future__ import annotations
++
++import argparse
++import sys
++import tempfile
++from pathlib import Path
++
++import pandas as pd
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++from cloudlayer.factory import get_adapter  # noqa: E402
++from monitoring.drift import DRIFT_ALERT_PSI, MIN_WINDOW_ROWS, compare  # noqa: E402
++from src import config, data  # noqa: E402
++
++
++def run(adapter, reference_uri: str, current_uri: str) -> int:
++    with tempfile.TemporaryDirectory() as tmp:
++        ref_path, cur_path = Path(tmp) / "reference.csv", Path(tmp) / "current.csv"
++        adapter.download(reference_uri, str(ref_path))
++        adapter.download(current_uri, str(cur_path))
++        reference, current = pd.read_csv(ref_path), pd.read_csv(cur_path)
++
++    if len(current) < MIN_WINDOW_ROWS:
++        print(f"SKIP  {len(current)} rows in the current window; need {MIN_WINDOW_ROWS}+ for PSI "
++              f"to be meaningful at threshold {DRIFT_ALERT_PSI}")
++        return 0
++
++    results = compare(reference, current, data.FEATURES)
++    for r in results:
++        adapter.emit_metric(f"drift.psi.{r.feature}", r.psi)
++        print(f"{r.feature:<22} psi={r.psi:.5f}  ks={r.ks_statistic:.5f}  {r.verdict}")
++
++    breached = [r.feature for r in results if r.psi >= DRIFT_ALERT_PSI]
++    if breached:
++        print(f"DRIFT  above {DRIFT_ALERT_PSI}: {', '.join(breached)}  (alert policy sends the email)")
++    else:
++        print(f"OK  no feature above {DRIFT_ALERT_PSI}")
++    return 0
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--reference-uri", required=True)
++    ap.add_argument("--current-uri", required=True)
++    args = ap.parse_args()
++    return run(get_adapter(config.load()), args.reference_uri, args.current_uri)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

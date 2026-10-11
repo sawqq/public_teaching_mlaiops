@@ -18,45 +18,79 @@ permissions:
 
 jobs:
   deploy-staging:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only a green CI run, and only one triggered by a push (never a pull request).
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-latest
     environment: staging
+    env:
+      # The exact commit CI tested. workflow_run otherwise checks out the tip of main, which
+      # may already be a newer, untested commit.
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      MODEL_VERSION: ${{ github.event.workflow_run.head_sha }}
+      # The eight capability slots src/config.py insists on. cloud.env is gitignored, so in CI
+      # they arrive as repository variables.
+      CLOUD_PROVIDER: gcp
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      BLOB_URI: ${{ vars.BLOB_URI }}
+      CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
+      MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+      MODEL_REGISTRY_NAME: ${{ vars.MODEL_REGISTRY_NAME }}
+      IDENTITY_REF: ${{ secrets.GCP_DEPLOY_SA }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      # --- AWS ---------------------------------------------------------------
-      # - uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-      #     aws-region: ${{ vars.REGION }}
-      # - run: aws ecr get-login-password --region ${{ vars.REGION }} | docker login --username AWS --password-stdin ${{ vars.CONTAINER_REGISTRY }}
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
 
-      # --- Azure -------------------------------------------------------------
-      # - uses: azure/login@v2
-      #   with:
-      #     client-id: ${{ secrets.AZURE_CLIENT_ID }}
-      #     tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-      #     subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      # - run: az acr login --name ${{ vars.ACR_NAME }}
+      - run: gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev --quiet
 
-      # --- GCP ---------------------------------------------------------------
-      # - uses: google-github-actions/auth@v2
-      #   with:
-      #     workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-      #     service_account: ${{ secrets.GCP_DEPLOY_SA }}
-      # - run: gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install google-cloud-storage google-cloud-aiplatform google-cloud-monitoring
+
+      # CI's images lived on a different runner and are gone, so build again from the same
+      # commit. The model is produced the way the CI integration test produces it and baked
+      # in at /app/model.joblib, which is where the adapter's deploy() points MODEL_PATH.
+      - name: Build serving image
+        run: |
+          python scripts/make_dataset.py
+          python -m src.train --metrics-out reports/metrics.json
+          python scripts/export_model.py --out reports/model.joblib
+          docker buildx build --platform linux/amd64 -f service/Dockerfile.serve \
+            -t itcs355-serve-base:${SHA} --load .
+          mkdir -p /tmp/modelctx && cp reports/model.joblib /tmp/modelctx/model.joblib
+          printf 'FROM itcs355-serve-base:%s\nCOPY --chown=runner:runner model.joblib /app/model.joblib\n' "${SHA}" \
+            > /tmp/modelctx/Dockerfile
+          docker buildx build --platform linux/amd64 -t itcs355-serve:${SHA} --load /tmp/modelctx
 
       - name: Push image
-        run: |
-          echo "TODO(Lab 4): push the SHA-tagged image through your adapter"
-          # python -c "from src import config; from cloudlayer.factory import get_adapter; \
-          #   print(get_adapter(config.load()).push_image('itcs355-serve:${{ github.sha }}'))"
+        id: push
+        run: python scripts/cd_steps.py push --tag itcs355-serve:${SHA}
 
       - name: Deploy to staging
+        id: deploy
         run: |
-          echo "TODO(Lab 4): adapter.deploy(model_ref, endpoint, instance)"
+          python scripts/cd_steps.py deploy \
+            --model-ref "${{ steps.push.outputs.ref }}" \
+            --endpoint "${{ vars.ENDPOINT_NAME }}" \
+            --instance "${{ vars.INSTANCE_TYPE }}"
 
       - name: Smoke test
         run: |
-          echo "TODO(Lab 4): adapter.invoke() with three known payloads."
-          echo "A deploy that is not smoke-tested is a deploy you have not verified."
+          python scripts/cd_steps.py smoke \
+            --endpoint "${{ steps.deploy.outputs.endpoint }}" \
+            --expect-version "${SHA}"

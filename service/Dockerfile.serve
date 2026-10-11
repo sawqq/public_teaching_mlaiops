@@ -1,13 +1,13 @@
 # ITCS355 Lab 3 — serving image
 #
 # TODO(Lab 3): pin by digest, as you did for the training image in Lab 1.
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e AS builder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 COPY requirements-serve.txt ./
 RUN pip install --prefix=/install -r requirements-serve.txt
 
-FROM python:3.11-slim AS runtime
+FROM python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e AS runtime
 RUN useradd --create-home --uid 10001 runner
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app
 COPY --from=builder /install /usr/local
@@ -15,6 +15,9 @@ WORKDIR /app
 COPY --chown=runner:runner service/ ./service/
 COPY --chown=runner:runner src/ ./src/
 COPY --chown=runner:runner cloudlayer/ ./cloudlayer/
+
+COPY --chown=runner:runner model.joblib ./model.joblib
+
 USER runner
 
 EXPOSE 8080
