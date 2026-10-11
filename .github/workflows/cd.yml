@@ -1,8 +1,11 @@
-# ITCS355 Lab 4 — continuous deployment.
+# ITCS355 Lab 4 — continuous deployment (GCP).
 #
-# Runs only on main, only after CI is green. Credentials come from OIDC federation, not
-# from stored keys — TODO(Lab 4): uncomment the block for YOUR provider and delete the
-# other two.
+# Runs only after CI succeeded on a push to main. Credentials come from workload identity
+# federation (OIDC), not from stored keys: there is no JSON key anywhere in this repository
+# or in its secrets.
+#
+# One-time setup (repository Settings -> Secrets and variables -> Actions) is listed in
+# docs/lab4-gcp-runbook.md.
 
 name: CD
 
@@ -63,19 +66,16 @@ jobs:
           pip install google-cloud-storage google-cloud-aiplatform google-cloud-monitoring
 
       # CI's images lived on a different runner and are gone, so build again from the same
-      # commit. The model is produced the way the CI integration test produces it and baked
-      # in at /app/model.joblib, which is where the adapter's deploy() points MODEL_PATH.
+      # commit. service/Dockerfile.serve bakes model.joblib in at /app/model.joblib (where the
+      # adapter's deploy() points MODEL_PATH), so produce that file in the repo root first,
+      # the same way the CI build job does.
       - name: Build serving image
         run: |
           python scripts/make_dataset.py
           python -m src.train --metrics-out reports/metrics.json
-          python scripts/export_model.py --out reports/model.joblib
+          python scripts/export_model.py --out model.joblib
           docker buildx build --platform linux/amd64 -f service/Dockerfile.serve \
-            -t itcs355-serve-base:${SHA} --load .
-          mkdir -p /tmp/modelctx && cp reports/model.joblib /tmp/modelctx/model.joblib
-          printf 'FROM itcs355-serve-base:%s\nCOPY --chown=runner:runner model.joblib /app/model.joblib\n' "${SHA}" \
-            > /tmp/modelctx/Dockerfile
-          docker buildx build --platform linux/amd64 -t itcs355-serve:${SHA} --load /tmp/modelctx
+            -t itcs355-serve:${SHA} --load .
 
       - name: Push image
         id: push
