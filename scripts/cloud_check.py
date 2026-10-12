@@ -49,7 +49,7 @@ def main() -> int:
         results.append(line(f"{cli} on PATH", found, "" if found else f"install the {provider} CLI"))
         if found:
             try:
-                subprocess.run(IDENTITY_CMD[provider], capture_output=True, check=True, timeout=30)
+                subprocess.run(IDENTITY_CMD[provider], capture_output=True, check=True, timeout=30, shell=True)
                 results.append(line("credentials", True, "identity resolved"))
             except Exception as exc:
                 results.append(line("credentials", False, f"{type(exc).__name__} — run the login command"))

@@ -21,10 +21,19 @@ import numpy as np
 import pandas as pd
 
 # Conventional PSI reading, and it IS only conventional — it comes from credit scoring,
-# where features are stable and volumes are large. Your problem may warrant something
-# tighter or looser. TODO(Lab 4): state your threshold and why, in your README.
+# where features are stable and volumes are large. Used here only to label the verdicts.
 PSI_NO_CHANGE = 0.10
 PSI_MODERATE = 0.25
+
+# OUR alert threshold, chosen from measurement, not from the convention above.
+# `python scripts/calibrate_drift_threshold.py` shows that on a 500-row window, two samples
+# of the SAME process give a worst-feature PSI up to 0.11 (p99 0.110, max 0.112), while the
+# +6 degC shift injected by `make inject-drift` gives about 0.32. 0.15 sits above the noise
+# with margin and at under half the injected signal, so a real shift fires and normal
+# variance does not. It is only valid for windows of at least MIN_WINDOW_ROWS: at 200 rows
+# the noise p99 is 0.19, above the threshold, and every run would false-alarm.
+DRIFT_ALERT_PSI = 0.15
+MIN_WINDOW_ROWS = 500
 
 
 @dataclass
@@ -106,14 +115,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reference", type=Path, default=Path("data/raw/sensors.csv"))
     ap.add_argument("--current", type=Path, required=True)
-    ap.add_argument("--threshold", type=float, default=PSI_MODERATE,
-                    help="alert above this PSI. Justify your value in the README.")
+    ap.add_argument("--threshold", type=float, default=DRIFT_ALERT_PSI,
+                    help="alert at or above this PSI; default justified in the README")
     ap.add_argument("--out", type=Path, default=Path("reports/drift.json"))
     ap.add_argument("--emit", action="store_true", help="send scores as cloud metrics")
     args = ap.parse_args()
 
     reference = pd.read_csv(args.reference)
     current = pd.read_csv(args.current)
+    if len(current) < MIN_WINDOW_ROWS:
+        print(f"SKIP  only {len(current)} rows in the current window; need at least "
+              f"{MIN_WINDOW_ROWS} for PSI to be meaningful at threshold {args.threshold}")
+        return 0
     results = compare(reference, current, data.FEATURES)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
