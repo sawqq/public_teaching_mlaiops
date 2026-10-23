@@ -48,7 +48,7 @@ def main() -> int:
             ("upload", lambda: adapter.upload(str(probe), "portability/probe.txt")),
             ("download", lambda: adapter.download(
                 f"{swapped.blob_uri}/portability/probe.txt", str(Path(tmp) / "back.txt"))),
-            ("invoke", lambda: adapter.invoke(swapped.project_id, {"rows": []})),
+            ("invoke", lambda: adapter.invoke(swapped.project_id, {"rows": [{"temp_c": 70.0, "vibration_mm_s": 3.0, "pressure_kpa": 200.0, "hours_since_service": 1000.0, "load_pct": 50.0, "ambient_humidity": 40.0}]})),
         ):
             try:
                 call()

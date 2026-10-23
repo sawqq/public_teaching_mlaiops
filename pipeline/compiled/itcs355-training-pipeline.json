@@ -1,0 +1,761 @@
+{
+  "components": {
+    "comp-condition-1": {
+      "dag": {
+        "tasks": {
+          "deploy-staging": {
+            "cachingOptions": {
+              "enableCache": true
+            },
+            "componentRef": {
+              "name": "comp-deploy-staging"
+            },
+            "dependentTasks": [
+              "register"
+            ],
+            "inputs": {
+              "parameters": {
+                "model_ref": {
+                  "taskOutputParameter": {
+                    "outputParameterKey": "model_ref",
+                    "producerTask": "register"
+                  }
+                }
+              }
+            },
+            "taskInfo": {
+              "name": "deploy_staging"
+            }
+          },
+          "register": {
+            "cachingOptions": {
+              "enableCache": true
+            },
+            "componentRef": {
+              "name": "comp-register"
+            },
+            "inputs": {
+              "artifacts": {
+                "model": {
+                  "componentInputArtifact": "pipelinechannel--train-model"
+                }
+              }
+            },
+            "taskInfo": {
+              "name": "register"
+            }
+          }
+        }
+      },
+      "inputDefinitions": {
+        "artifacts": {
+          "pipelinechannel--train-model": {
+            "artifactType": {
+              "schemaTitle": "system.Model",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "pipelinechannel--evaluate-gate_decision": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-deploy-staging": {
+      "executorLabel": "exec-deploy-staging",
+      "inputDefinitions": {
+        "parameters": {
+          "model_ref": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-evaluate": {
+      "executorLabel": "exec-evaluate",
+      "inputDefinitions": {
+        "artifacts": {
+          "metrics": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "incumbent_override": {
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "gate_decision": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-ingest": {
+      "executorLabel": "exec-ingest",
+      "outputDefinitions": {
+        "artifacts": {
+          "raw_data": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    },
+    "comp-register": {
+      "executorLabel": "exec-register",
+      "inputDefinitions": {
+        "artifacts": {
+          "model": {
+            "artifactType": {
+              "schemaTitle": "system.Model",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "model_ref": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-train": {
+      "executorLabel": "exec-train",
+      "inputDefinitions": {
+        "artifacts": {
+          "raw_data": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "base_output_directory": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "display_name": {
+            "defaultValue": "train",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "enable_web_access": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "encryption_spec_key_name": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "labels": {
+            "defaultValue": {
+              "course": "itcs355",
+              "lab": "5",
+              "student": "itcs355-6688101"
+            },
+            "isOptional": true,
+            "parameterType": "STRUCT"
+          },
+          "location": {
+            "defaultValue": "{{$.pipeline_google_cloud_location}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "max_wait_duration": {
+            "defaultValue": "86400s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "network": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "persistent_resource_id": {
+            "defaultValue": "{{$.pipeline_persistent_resource_id}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "project": {
+            "defaultValue": "{{$.pipeline_google_cloud_project_id}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "psc_interface_config": {
+            "isOptional": true,
+            "parameterType": "STRUCT"
+          },
+          "reserved_ip_ranges": {
+            "isOptional": true,
+            "parameterType": "LIST"
+          },
+          "restart_job_on_worker_restart": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "seed": {
+            "parameterType": "STRING"
+          },
+          "service_account": {
+            "defaultValue": "itcs355-pipeline@itcs355-6688101.iam.gserviceaccount.com",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "strategy": {
+            "defaultValue": "SPOT",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "tensorboard": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "timeout": {
+            "defaultValue": "604800s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "worker_pool_specs": {
+            "defaultValue": [
+              {
+                "container_spec": {
+                  "args": [
+                    "mkdir -p data/raw\ncp \"$0\" data/raw/sensors.csv\ntest -s data/raw/sensors.csv\nmkdir -p \"$(dirname \"$1\")\" \"$2\"\npython -m src.train --metrics-out \"$1\" --seed \"$3\" --model-out \"$2/model.joblib\"\ncp \"$1\" \"$2/metrics.json\"",
+                    "{{$.inputs.artifacts['raw_data'].path}}",
+                    "{{$.outputs.artifacts['metrics'].path}}",
+                    "{{$.outputs.artifacts['model'].path}}",
+                    "{{$.inputs.parameters['seed']}}"
+                  ],
+                  "command": [
+                    "sh",
+                    "-ec"
+                  ],
+                  "env": [
+                    {
+                      "name": "CLOUD_PROVIDER",
+                      "value": "gcp"
+                    },
+                    {
+                      "name": "PROJECT_ID",
+                      "value": "itcs355-6688101"
+                    },
+                    {
+                      "name": "REGION",
+                      "value": "asia-southeast1"
+                    },
+                    {
+                      "name": "BLOB_URI",
+                      "value": "gs://itcs-355-6688101/itcs355"
+                    },
+                    {
+                      "name": "CONTAINER_REGISTRY",
+                      "value": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355"
+                    },
+                    {
+                      "name": "MLFLOW_TRACKING_URI",
+                      "value": "sqlite:///mlflow.db"
+                    },
+                    {
+                      "name": "MODEL_REGISTRY_NAME",
+                      "value": "itcs355-6688101"
+                    },
+                    {
+                      "name": "IDENTITY_REF",
+                      "value": "user:chavis.rittigun@gmail.com"
+                    }
+                  ],
+                  "image_uri": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355/itcs355:lab5-v1"
+                },
+                "disk_spec": {
+                  "boot_disk_size_gb": 100.0,
+                  "boot_disk_type": "pd-ssd"
+                },
+                "machine_spec": {
+                  "machine_type": "e2-standard-4"
+                },
+                "replica_count": 1.0
+              }
+            ],
+            "isOptional": true,
+            "parameterType": "LIST"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "artifacts": {
+          "metrics": {
+            "artifactType": {
+              "schemaTitle": "system.Artifact",
+              "schemaVersion": "0.0.1"
+            }
+          },
+          "model": {
+            "artifactType": {
+              "schemaTitle": "system.Model",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        },
+        "parameters": {
+          "gcp_resources": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-validate": {
+      "executorLabel": "exec-validate",
+      "inputDefinitions": {
+        "artifacts": {
+          "raw_data": {
+            "artifactType": {
+              "schemaTitle": "system.Dataset",
+              "schemaVersion": "0.0.1"
+            }
+          }
+        }
+      }
+    }
+  },
+  "deploymentSpec": {
+    "executors": {
+      "exec-deploy-staging": {
+        "container": {
+          "args": [
+            "python scripts/deploy.py --target staging --model-ref \"$0\"",
+            "{{$.inputs.parameters['model_ref']}}"
+          ],
+          "command": [
+            "sh",
+            "-ec"
+          ],
+          "env": [
+            {
+              "name": "CLOUD_PROVIDER",
+              "value": "gcp"
+            },
+            {
+              "name": "PROJECT_ID",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "REGION",
+              "value": "asia-southeast1"
+            },
+            {
+              "name": "BLOB_URI",
+              "value": "gs://itcs-355-6688101/itcs355"
+            },
+            {
+              "name": "CONTAINER_REGISTRY",
+              "value": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355"
+            },
+            {
+              "name": "MLFLOW_TRACKING_URI",
+              "value": "sqlite:///mlflow.db"
+            },
+            {
+              "name": "MODEL_REGISTRY_NAME",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "IDENTITY_REF",
+              "value": "user:chavis.rittigun@gmail.com"
+            }
+          ],
+          "image": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355/itcs355:lab5-v1"
+        }
+      },
+      "exec-evaluate": {
+        "container": {
+          "args": [
+            "mkdir -p \"$(dirname \"$1\")\"\nif python scripts/evaluation_gate.py --metrics \"$0\" ${2:+--incumbent \"$2\"}; then printf pass > \"$1\"; else printf fail > \"$1\"; fi\necho \"gate_decision=$(cat \"$1\")\"",
+            "{{$.inputs.artifacts['metrics'].path}}",
+            "{{$.outputs.parameters['gate_decision'].output_file}}",
+            "{{$.inputs.parameters['incumbent_override']}}"
+          ],
+          "command": [
+            "sh",
+            "-ec"
+          ],
+          "env": [
+            {
+              "name": "CLOUD_PROVIDER",
+              "value": "gcp"
+            },
+            {
+              "name": "PROJECT_ID",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "REGION",
+              "value": "asia-southeast1"
+            },
+            {
+              "name": "BLOB_URI",
+              "value": "gs://itcs-355-6688101/itcs355"
+            },
+            {
+              "name": "CONTAINER_REGISTRY",
+              "value": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355"
+            },
+            {
+              "name": "MLFLOW_TRACKING_URI",
+              "value": "sqlite:///mlflow.db"
+            },
+            {
+              "name": "MODEL_REGISTRY_NAME",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "IDENTITY_REF",
+              "value": "user:chavis.rittigun@gmail.com"
+            }
+          ],
+          "image": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355/itcs355:lab5-v1"
+        }
+      },
+      "exec-ingest": {
+        "container": {
+          "args": [
+            "mkdir -p \"$(dirname \"$0\")\"\npython scripts/make_dataset.py --out \"$0\"",
+            "{{$.outputs.artifacts['raw_data'].path}}"
+          ],
+          "command": [
+            "sh",
+            "-ec"
+          ],
+          "env": [
+            {
+              "name": "CLOUD_PROVIDER",
+              "value": "gcp"
+            },
+            {
+              "name": "PROJECT_ID",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "REGION",
+              "value": "asia-southeast1"
+            },
+            {
+              "name": "BLOB_URI",
+              "value": "gs://itcs-355-6688101/itcs355"
+            },
+            {
+              "name": "CONTAINER_REGISTRY",
+              "value": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355"
+            },
+            {
+              "name": "MLFLOW_TRACKING_URI",
+              "value": "sqlite:///mlflow.db"
+            },
+            {
+              "name": "MODEL_REGISTRY_NAME",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "IDENTITY_REF",
+              "value": "user:chavis.rittigun@gmail.com"
+            }
+          ],
+          "image": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355/itcs355:lab5-v1"
+        }
+      },
+      "exec-register": {
+        "container": {
+          "args": [
+            "mkdir -p \"$(dirname \"$1\")\"\npython scripts/register.py --model-uri \"$0\" --ref-out \"$1\"",
+            "{{$.inputs.artifacts['model'].uri}}",
+            "{{$.outputs.parameters['model_ref'].output_file}}"
+          ],
+          "command": [
+            "sh",
+            "-ec"
+          ],
+          "env": [
+            {
+              "name": "CLOUD_PROVIDER",
+              "value": "gcp"
+            },
+            {
+              "name": "PROJECT_ID",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "REGION",
+              "value": "asia-southeast1"
+            },
+            {
+              "name": "BLOB_URI",
+              "value": "gs://itcs-355-6688101/itcs355"
+            },
+            {
+              "name": "CONTAINER_REGISTRY",
+              "value": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355"
+            },
+            {
+              "name": "MLFLOW_TRACKING_URI",
+              "value": "sqlite:///mlflow.db"
+            },
+            {
+              "name": "MODEL_REGISTRY_NAME",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "IDENTITY_REF",
+              "value": "user:chavis.rittigun@gmail.com"
+            }
+          ],
+          "image": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355/itcs355:lab5-v1"
+        }
+      },
+      "exec-train": {
+        "container": {
+          "args": [
+            "--type",
+            "CustomJob",
+            "--payload",
+            "{\"display_name\": \"{{$.inputs.parameters['display_name']}}\", \"job_spec\": {\"worker_pool_specs\": {{$.inputs.parameters['worker_pool_specs']}}, \"scheduling\": {\"timeout\": \"{{$.inputs.parameters['timeout']}}\", \"restart_job_on_worker_restart\": {{$.inputs.parameters['restart_job_on_worker_restart']}}, \"strategy\": \"{{$.inputs.parameters['strategy']}}\", \"max_wait_duration\": \"{{$.inputs.parameters['max_wait_duration']}}\"}, \"service_account\": \"{{$.inputs.parameters['service_account']}}\", \"tensorboard\": \"{{$.inputs.parameters['tensorboard']}}\", \"enable_web_access\": {{$.inputs.parameters['enable_web_access']}}, \"network\": \"{{$.inputs.parameters['network']}}\", \"reserved_ip_ranges\": {{$.inputs.parameters['reserved_ip_ranges']}}, \"base_output_directory\": {\"output_uri_prefix\": \"{{$.inputs.parameters['base_output_directory']}}\"}, \"persistent_resource_id\": \"{{$.inputs.parameters['persistent_resource_id']}}\", \"psc_interface_config\": {{$.inputs.parameters['psc_interface_config']}}}, \"labels\": {{$.inputs.parameters['labels']}}, \"encryption_spec\": {\"kms_key_name\": \"{{$.inputs.parameters['encryption_spec_key_name']}}\"}}",
+            "--project",
+            "{{$.inputs.parameters['project']}}",
+            "--location",
+            "{{$.inputs.parameters['location']}}",
+            "--gcp_resources",
+            "{{$.outputs.parameters['gcp_resources'].output_file}}"
+          ],
+          "command": [
+            "python3",
+            "-u",
+            "-m",
+            "google_cloud_pipeline_components.container.v1.custom_job.launcher"
+          ],
+          "image": "gcr.io/ml-pipeline/google-cloud-pipeline-components:2.22.0"
+        }
+      },
+      "exec-validate": {
+        "container": {
+          "args": [
+            "mkdir -p data/raw\ncp \"$0\" data/raw/sensors.csv\ntest -s data/raw/sensors.csv\npytest -q tests/test_data.py -rs",
+            "{{$.inputs.artifacts['raw_data'].path}}"
+          ],
+          "command": [
+            "sh",
+            "-ec"
+          ],
+          "env": [
+            {
+              "name": "CLOUD_PROVIDER",
+              "value": "gcp"
+            },
+            {
+              "name": "PROJECT_ID",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "REGION",
+              "value": "asia-southeast1"
+            },
+            {
+              "name": "BLOB_URI",
+              "value": "gs://itcs-355-6688101/itcs355"
+            },
+            {
+              "name": "CONTAINER_REGISTRY",
+              "value": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355"
+            },
+            {
+              "name": "MLFLOW_TRACKING_URI",
+              "value": "sqlite:///mlflow.db"
+            },
+            {
+              "name": "MODEL_REGISTRY_NAME",
+              "value": "itcs355-6688101"
+            },
+            {
+              "name": "IDENTITY_REF",
+              "value": "user:chavis.rittigun@gmail.com"
+            }
+          ],
+          "image": "asia-southeast1-docker.pkg.dev/itcs355-6688101/itcs355/itcs355:lab5-v1"
+        }
+      }
+    }
+  },
+  "pipelineInfo": {
+    "name": "itcs355-training-pipeline"
+  },
+  "root": {
+    "dag": {
+      "tasks": {
+        "condition-1": {
+          "componentRef": {
+            "name": "comp-condition-1"
+          },
+          "dependentTasks": [
+            "evaluate",
+            "train"
+          ],
+          "inputs": {
+            "artifacts": {
+              "pipelinechannel--train-model": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "model",
+                  "producerTask": "train"
+                }
+              }
+            },
+            "parameters": {
+              "pipelinechannel--evaluate-gate_decision": {
+                "taskOutputParameter": {
+                  "outputParameterKey": "gate_decision",
+                  "producerTask": "evaluate"
+                }
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "gate-passed"
+          },
+          "triggerPolicy": {
+            "condition": "inputs.parameter_values['pipelinechannel--evaluate-gate_decision'] == 'pass'"
+          }
+        },
+        "evaluate": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-evaluate"
+          },
+          "dependentTasks": [
+            "train"
+          ],
+          "inputs": {
+            "artifacts": {
+              "metrics": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "metrics",
+                  "producerTask": "train"
+                }
+              }
+            },
+            "parameters": {
+              "incumbent_override": {
+                "componentInputParameter": "incumbent_override"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "evaluate"
+          }
+        },
+        "ingest": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-ingest"
+          },
+          "taskInfo": {
+            "name": "ingest"
+          }
+        },
+        "train": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-train"
+          },
+          "dependentTasks": [
+            "ingest",
+            "validate"
+          ],
+          "inputs": {
+            "artifacts": {
+              "raw_data": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "raw_data",
+                  "producerTask": "ingest"
+                }
+              }
+            },
+            "parameters": {
+              "seed": {
+                "componentInputParameter": "seed"
+              }
+            }
+          },
+          "retryPolicy": {
+            "backoffDuration": "0s",
+            "backoffFactor": 2.0,
+            "backoffMaxDuration": "3600s",
+            "maxRetryCount": 2
+          },
+          "taskInfo": {
+            "name": "train"
+          }
+        },
+        "validate": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-validate"
+          },
+          "dependentTasks": [
+            "ingest"
+          ],
+          "inputs": {
+            "artifacts": {
+              "raw_data": {
+                "taskOutputArtifact": {
+                  "outputArtifactKey": "raw_data",
+                  "producerTask": "ingest"
+                }
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "validate"
+          }
+        }
+      }
+    },
+    "inputDefinitions": {
+      "parameters": {
+        "incumbent_override": {
+          "defaultValue": "",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "seed": {
+          "defaultValue": "20260101",
+          "isOptional": true,
+          "parameterType": "STRING"
+        }
+      }
+    }
+  },
+  "schemaVersion": "2.1.0",
+  "sdkVersion": "kfp-2.17.3"
+}

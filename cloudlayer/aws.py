@@ -21,15 +21,67 @@ from cloudlayer.base import CloudAdapter
 
 
 class AwsAdapter(CloudAdapter):
+    @staticmethod
+    def _split_s3(uri: str) -> tuple[str, str]:
+        """s3://bucket/some/key -> ("bucket", "some/key"). Provider parsing lives here, never in src/."""
+        if not uri.startswith("s3://"):
+            raise ValueError(
+                f"AwsAdapter needs an s3:// URI, got {uri!r}. BLOB_URI is provider-specific, "
+                "so switching provider means switching BLOB_URI too."
+            )
+        bucket, _, key = uri.removeprefix("s3://").partition("/")
+        return bucket, key
+ 
     def upload(self, local_path: str, key: str) -> str:
-        raise NotImplementedError("TODO Lab 1: put_object into BLOB_URI, return the s3:// URI")
-
+        import boto3
+ 
+        bucket, prefix = self._split_s3(self.cfg.blob_uri)
+        full_key = f"{prefix.rstrip('/')}/{key}".lstrip("/")
+        boto3.client("s3", region_name=self.cfg.region).upload_file(local_path, bucket, full_key)
+        return f"s3://{bucket}/{full_key}"
+ 
     def download(self, uri: str, local_path: str) -> None:
-        raise NotImplementedError("TODO Lab 1: download_file, creating parent directories")
-
+        from pathlib import Path
+ 
+        import boto3
+ 
+        bucket, key = self._split_s3(uri)
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        boto3.client("s3", region_name=self.cfg.region).download_file(bucket, key, local_path)
+    
+    def invoke(self, endpoint: str, payload: dict) -> dict:
+        """Call the model service running on AWS (App Runner) and return its JSON body.
+ 
+        `endpoint` may be a full URL, or any other name, in which case the URL is read from
+        the AWS_INVOKE_URL environment variable. That indirection is itself a leak: the
+        other providers resolve an endpoint NAME to an address for you.
+ 
+        The body is returned as the service sent it. This service answers
+        {"probabilities": [...], "model_version": "..."}; a managed Vertex endpoint wraps
+        results as {"predictions": [...]}. The caller's parsing differs, and it is not
+        hidden here on purpose.
+        """
+        import json
+        import os
+        import urllib.request
+ 
+        base = endpoint if endpoint.startswith(("http://", "https://")) else os.environ.get("AWS_INVOKE_URL", "")
+        if not base:
+            raise RuntimeError("Set AWS_INVOKE_URL to the App Runner service URL, or pass the URL as `endpoint`.")
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/predict/batch",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+ 
+    
     def push_image(self, local_tag: str) -> str:
-        raise NotImplementedError("TODO Lab 1: authenticate to ECR, push, return repo@sha256:...")
-
+        raise NotImplementedError("Task 4 ports only upload, download and invoke")
     # submit_training / register_model  -> Lab 2 (SageMaker training job + model package group)
     # deploy / invoke                   -> Lab 3 (SageMaker real-time endpoint)
     # emit_metric                       -> Lab 4 (CloudWatch put_metric_data)

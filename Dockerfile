@@ -38,6 +38,9 @@ COPY --chown=runner:runner scripts/ ./scripts/
 
 RUN chown -R runner:runner /app
 
+COPY --chown=runner:runner tests/ ./tests/
+RUN mkdir -p /app/data/raw /outputs && chown -R runner:runner /app /outputs
+
 USER runner
 
 # Credentials NEVER enter an image layer. They arrive at runtime from SECRET_STORE_PATH

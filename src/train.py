@@ -14,6 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import joblib
 import mlflow
 import mlflow.sklearn
 from sklearn.ensemble import RandomForestClassifier
@@ -43,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-name", default=None)
     p.add_argument("--metrics-out", type=Path, default=None,
                    help="Write final metrics as JSON. Used by `make verify`.")
+    p.add_argument("--model-out", type=Path, default=None,
+                   help="Also write the fitted model as a joblib file (Lab 5 pipeline).")
     return p.parse_args()
 
 
@@ -94,6 +97,11 @@ def main() -> None:
         mlflow.sklearn.log_model(model, name="model")
 
         print(json.dumps({"seed": seed, "data_fingerprint": fingerprint, **metrics}, indent=2))
+        
+        if args.model_out:
+            args.model_out.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump(model, args.model_out)
+        
         if args.metrics_out:
             args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
             args.metrics_out.write_text(json.dumps(

@@ -41,9 +41,16 @@ def main() -> int:
     if incumbent is None:
         # TODO(Lab 5): read the production version's metric from the registry instead of
         # assuming there is no incumbent. A first run legitimately has none.
-        print("no incumbent supplied — treating as first registration")
-        print("GATE PASS")
-        return 0
+        
+        try:
+            incumbent = read_incumbent(args.metric)
+        except Exception as exc:  # noqa: BLE001
+                    print(f"GATE FAIL  could not read the incumbent ({exc!r}); failing closed")
+                    return 1
+        if incumbent is None:
+                    print("no incumbent supplied — treating as first registration")
+                    print("GATE PASS")
+                    return 0
 
     delta = candidate - incumbent
     print(f"incumbent {incumbent:.4f}  delta {delta:+.4f}  required {MIN_IMPROVEMENT:+.4f}")
